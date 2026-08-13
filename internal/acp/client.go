@@ -22,6 +22,9 @@ const (
 	closeGrace      = 5 * time.Second
 )
 
+// ErrSessionMissing reports that an adapter cannot restore a saved session.
+var ErrSessionMissing = errors.New("acp: saved session is missing")
+
 type StopReason string
 
 const (
@@ -221,7 +224,7 @@ func (c *Client) LoadSession(
 
 func IsSessionMissing(err error) bool {
 	var rpcErr *rpcError
-	return errors.As(err, &rpcErr) && rpcErr.Code == -32002
+	return errors.Is(err, ErrSessionMissing) || errors.As(err, &rpcErr) && rpcErr.Code == -32002
 }
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, error) {

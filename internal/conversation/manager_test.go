@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 type fakeClient struct {
 	nextSession int
+	loadErr     error
 	loads       []string
 	prompts     []promptCall
 }
@@ -41,7 +43,7 @@ func (f *fakeClient) NewSession(context.Context, string, []acp.MCPServer) (strin
 
 func (f *fakeClient) LoadSession(_ context.Context, _, sessionID string, _ []acp.MCPServer) error {
 	f.loads = append(f.loads, sessionID)
-	return nil
+	return f.loadErr
 }
 
 func (f *fakeClient) Prompt(_ context.Context, sessionID, text string) (acp.Turn, error) {
@@ -170,6 +172,48 @@ func TestNewManagerLoadsSavedSession(t *testing.T) {
 	}
 	if after.SessionID != first.SessionID {
 		t.Fatalf("post-restart session = %q, want %q", after.SessionID, first.SessionID)
+	}
+}
+
+func TestMissingSavedSessionStartsReplacementWithHandoff(t *testing.T) {
+	store := openStore(t)
+	scope := state.RoomScope("room-1")
+	firstManager := newManager(t, store, &fakeClient{}, 10)
+	handle(t, firstManager, Input{Scope: scope, MessageID: "m1", Text: "The release is Friday"})
+	first := handle(t, firstManager, Input{Scope: scope, MessageID: "m2", Text: "Review is pending"})
+	client := &fakeClient{nextSession: 1, loadErr: acp.ErrSessionMissing}
+	after := handle(t, newManager(t, store, client, 10), Input{Scope: scope, MessageID: "m3", Text: "What should we do next?"})
+	saved, exists, err := store.Conversation(context.Background(), scope)
+	if len(client.loads) != 1 || client.loads[0] != first.SessionID || client.nextSession != 2 ||
+		after.SessionID == first.SessionID || after.Generation != first.Generation+1 || len(client.prompts) != 1 ||
+		err != nil || !exists || saved.ACPSessionID != after.SessionID || saved.CompletedTurns != 1 || saved.ContextEpoch != 1 {
+		t.Fatalf("replacement = %+v, persisted = %+v, loads %v, opens %d, prompts %d, exists %v, err %v", after, saved, client.loads, client.nextSession-1, len(client.prompts), exists, err)
+	}
+	prompt := client.prompts[0].text
+	for _, text := range []string{
+		"The release is Friday", "Review is pending", "What should we do next?",
+	} {
+		if !strings.Contains(prompt, text) {
+			t.Fatalf("replacement prompt lacks %q:\n%s", text, prompt)
+		}
+	}
+}
+
+func TestSavedSessionLoadFailureStopsTurn(t *testing.T) {
+	store := openStore(t)
+	scope := state.RoomScope("room-1")
+	first := handle(t, newManager(t, store, &fakeClient{}, 10), Input{Scope: scope, MessageID: "m1", Text: "Keep this session"})
+	loadErr := errors.New("adapter unavailable")
+	client := &fakeClient{loadErr: loadErr}
+	_, err := newManager(t, store, client, 10).Handle(context.Background(), Input{
+		Scope: scope, MessageID: "m2", Text: "Do not run this turn",
+	})
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("Handle error = %v, want wrapped load error", err)
+	}
+	if len(client.loads) != 1 || client.loads[0] != first.SessionID ||
+		client.nextSession != 0 || len(client.prompts) != 0 {
+		t.Fatalf("load failure made calls: loads %v, opens %d, prompts %d", client.loads, client.nextSession, len(client.prompts))
 	}
 }
 

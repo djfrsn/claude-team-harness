@@ -300,6 +300,18 @@ The gate checks shell and workflow files, Go format and lint rules, known Go
 vulnerabilities, tests, race safety in CI, coverage, file length, and the source
 line budget.
 
+The line budget uses 100-line bands. Routine work uses the current headroom.
+When a change crosses the ceiling, update it to the smallest new band:
+
+```sh
+bash scripts/gate/loc.sh --raise
+```
+
+Commit `scripts/gate/loc-budget.txt` with the work that spends the lines. After
+the repository shrinks by two or more bands, apply the smaller ceiling with
+`bash scripts/gate/loc.sh --tighten`. Pull-request CI rejects a budget increase
+that the change does not need or that exceeds the smallest valid band.
+
 Enable the Git pre-commit hook once per clone:
 
 ```sh

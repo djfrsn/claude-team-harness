@@ -200,8 +200,8 @@ delivery. Give each external mutation an idempotency key because a process can
 stop after the mutation and before it records completion.
 
 The ACP client sends `session/cancel` when a turn reaches its timeout. It waits
-two seconds for the adapter, then retires that adapter process. Restart the
-service to restore a retired pool slot.
+two seconds for the adapter, then retires that adapter process. The next normal
+turn starts a replacement in the same pool slot and resumes its stored session.
 
 Add `Prefer: wait=30` to wait for up to 30 seconds. The service returns `200`
 with the completed run when it finishes during that interval. It returns `202`

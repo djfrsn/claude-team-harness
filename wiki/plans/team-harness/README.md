@@ -58,6 +58,8 @@ poll a run resource or request a short bounded wait.
   returns to the queue after an interrupted process.
 - As an operator, when an ACP adapter does not answer cancellation, the turn
   ends within a fixed grace period and releases its worker.
+- As a room member, when an ACP adapter becomes unavailable, my next turn uses
+  a replacement in the same pool slot and resumes the stored session.
 - As a security owner, the ACP adapter receives only the environment values
   required to start Claude and run its selected MCP servers.
 - As an API caller, when a queued turn fails or times out, its run reaches the
@@ -104,7 +106,9 @@ ACP adapter.
 The ACP client sends cancellation when a turn context ends. It waits for a
 short grace period, then returns the context error and releases the worker. The
 adapter process receives a small system environment plus values that the
-harness supplies for Claude and the selected MCP profile.
+harness supplies for Claude and the selected MCP profile. The next normal turn
+replaces an unavailable adapter and loads the durable session into the new
+slot process.
 
 The HTTP service exposes `GET /healthz`, `GET /v1/personas`,
 `POST /v1/messages`, `GET /v1/runs/{runId}`, and `POST /v1/webex/events`.
@@ -126,5 +130,6 @@ independent persona, room, and thread sessions, stable pool slots, live
 steering, rotation handoff, fresh sessions, and webhook deduplication.
 Failure-path tests check bounded ACP cancellation, adapter credential scope,
 failed run state, shutdown requeue, worker restart, queue-to-ACP steering,
-missing-session replacement, and session-load failure handling.
+missing-session replacement, unavailable-slot replacement, and session-load
+failure handling.
 `go test ./...` and live HTTP prompts provide the release checks.

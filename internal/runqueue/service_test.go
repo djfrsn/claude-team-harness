@@ -70,10 +70,10 @@ func TestServiceMarksTurnTimeoutFailed(t *testing.T) {
 	}
 }
 
-func TestServiceRequeuesActiveRunAndCompletesItAfterRestart(t *testing.T) {
+func TestServiceRequeuesActiveRunOnShutdown(t *testing.T) {
 	store := openStore(t)
 	started := make(chan struct{})
-	first, cancelFirst := startService(t, store, time.Second, handlerFunc(func(
+	service, cancel := startService(t, store, time.Second, handlerFunc(func(
 		ctx context.Context, _ conversation.Input,
 	) (conversation.Result, error) {
 		close(started)
@@ -81,10 +81,10 @@ func TestServiceRequeuesActiveRunAndCompletesItAfterRestart(t *testing.T) {
 		return conversation.Result{}, ctx.Err()
 	}))
 
-	run := submitRun(t, first, "message-restart")
-	awaitSignal(t, started, "first handler start")
-	cancelFirst()
-	awaitSignal(t, first.Done(), "first service shutdown")
+	run := submitRun(t, service, "message-shutdown")
+	awaitSignal(t, started, "handler start")
+	cancel()
+	awaitSignal(t, service.Done(), "service shutdown")
 
 	requeued, found, err := store.MessageRun(context.Background(), run.ID)
 	if err != nil || !found {
@@ -94,24 +94,59 @@ func TestServiceRequeuesActiveRunAndCompletesItAfterRestart(t *testing.T) {
 		t.Fatalf("requeued run = status %q, started %v; want queued with no start time",
 			requeued.Status, requeued.StartedAt)
 	}
+}
+
+func TestServiceCompletesPersistedRunningRunAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/state.db"
+	firstStore, err := state.Open(path)
+	if err != nil {
+		t.Fatalf("open first state: %v", err)
+	}
+	t.Cleanup(func() { _ = firstStore.Close() })
+	wanted := state.MessageRun{
+		ID: "run-restart", MessageID: "message-restart", Scope: state.RoomScope("room-1"),
+		Text: "status", Mode: string(conversation.ModeContinue),
+	}
+	if _, created, err := firstStore.QueueMessageRun(ctx, wanted); err != nil || !created {
+		t.Fatalf("queue run = (%v, %v), want created", created, err)
+	}
+	claimed, found, err := firstStore.ClaimMessageRun(ctx)
+	if err != nil || !found || claimed.ID != wanted.ID || claimed.Status != "running" {
+		t.Fatalf("claim run = (%+v, %v, %v), want running %q", claimed, found, err, wanted.ID)
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatalf("close first state: %v", err)
+	}
+
+	restartedStore, err := state.Open(path)
+	if err != nil {
+		t.Fatalf("reopen state: %v", err)
+	}
+	t.Cleanup(func() { _ = restartedStore.Close() })
+	recovered, found, err := restartedStore.MessageRun(ctx, wanted.ID)
+	if err != nil || !found || recovered.Status != "queued" || !recovered.StartedAt.IsZero() {
+		t.Fatalf("recovered run = (%+v, %v, %v), want queued with no start time",
+			recovered, found, err)
+	}
 
 	received := make(chan conversation.Input, 1)
-	second, cancelSecond := startService(t, store, time.Second, handlerFunc(func(
+	service, cancel := startService(t, restartedStore, time.Second, handlerFunc(func(
 		_ context.Context, input conversation.Input,
 	) (conversation.Result, error) {
 		received <- input
 		return conversation.Result{RunID: input.RunID, Reply: "recovered"}, nil
 	}))
-	defer stopService(t, second, cancelSecond)
+	defer stopService(t, service, cancel)
 
-	completed := waitForRun(t, second, run.ID)
-	if completed.ID != run.ID || completed.Status != "completed" || completed.Reply != "recovered" {
+	completed := waitForRun(t, service, wanted.ID)
+	if completed.ID != wanted.ID || completed.Status != "completed" || completed.Reply != "recovered" {
 		t.Fatalf("completed run = %+v, want same ID with recovered reply", completed)
 	}
 	select {
 	case input := <-received:
-		if input.RunID != run.ID {
-			t.Fatalf("handler run ID = %q, want %q", input.RunID, run.ID)
+		if input.RunID != wanted.ID {
+			t.Fatalf("handler run ID = %q, want %q", input.RunID, wanted.ID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for recovered handler input")

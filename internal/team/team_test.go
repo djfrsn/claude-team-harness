@@ -6,12 +6,15 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/your-company/claude-team-harness/internal/acp"
 	"github.com/your-company/claude-team-harness/internal/conversation"
 	"github.com/your-company/claude-team-harness/internal/mcpprofile"
 	"github.com/your-company/claude-team-harness/internal/persona"
+	"github.com/your-company/claude-team-harness/internal/runqueue"
 	"github.com/your-company/claude-team-harness/internal/state"
 )
 
@@ -22,9 +25,11 @@ type fakeAgent struct {
 }
 
 type steeringAgent struct {
-	started chan struct{}
-	release chan struct{}
-	steers  chan string
+	started     chan struct{}
+	release     chan struct{}
+	steers      chan string
+	sessions    chan string
+	promptCalls atomic.Int32
 }
 
 func (f *steeringAgent) NewSession(context.Context, string, []acp.MCPServer) (string, error) {
@@ -33,15 +38,20 @@ func (f *steeringAgent) NewSession(context.Context, string, []acp.MCPServer) (st
 func (f *steeringAgent) LoadSession(context.Context, string, string, []acp.MCPServer) error {
 	return nil
 }
-func (f *steeringAgent) Prompt(context.Context, string, string) (acp.Turn, error) {
+func (f *steeringAgent) Prompt(ctx context.Context, _ string, _ string) (acp.Turn, error) {
+	f.promptCalls.Add(1)
 	close(f.started)
-	<-f.release
-	return acp.Turn{Reply: "steered reply", StopReason: acp.StopEndTurn}, nil
+	select {
+	case <-f.release:
+		return acp.Turn{Reply: "steered reply", StopReason: acp.StopEndTurn}, nil
+	case <-ctx.Done():
+		return acp.Turn{}, ctx.Err()
+	}
 }
 func (f *steeringAgent) SupportsSteering() bool { return true }
-func (f *steeringAgent) Steer(_ context.Context, _ string, text string) (acp.SteerOutcome, error) {
+func (f *steeringAgent) Steer(_ context.Context, session, text string) (acp.SteerOutcome, error) {
+	f.sessions <- session
 	f.steers <- text
-	close(f.release)
 	return acp.SteerInjected, nil
 }
 
@@ -132,38 +142,59 @@ func TestConversationKeepsItsAssignedSlot(t *testing.T) {
 	}
 }
 
-func TestActiveConversationAcceptsSteering(t *testing.T) {
+func TestQueuedMessageSteersActiveRun(t *testing.T) {
 	agent := &steeringAgent{
 		started: make(chan struct{}), release: make(chan struct{}), steers: make(chan string, 1),
+		sessions: make(chan string, 1),
 	}
 	runtime := newRuntimeWithClient(t, agent)
-	firstResult := make(chan conversation.Result, 1)
-	firstError := make(chan error, 1)
-	go func() {
-		result, err := runtime.Handle(context.Background(), conversation.Input{
-			Scope: state.RoomScope("room"), MessageID: "first", Text: "Draft the report",
-		})
-		firstResult <- result
-		firstError <- err
-	}()
-	<-agent.started
-	steered, err := runtime.Handle(context.Background(), conversation.Input{
-		Scope: state.RoomScope("room"), MessageID: "second", Text: "Focus on Friday",
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	queue, err := runqueue.New(ctx, runqueue.Config{
+		Store: runtime.cfg.Store, Handler: runtime, Workers: 2, TurnTimeout: time.Second,
 	})
 	if err != nil {
-		t.Fatalf("steer Handle: %v", err)
+		t.Fatalf("New queue: %v", err)
 	}
-	if !steered.Steered || steered.RunID == "" {
+	t.Cleanup(func() { cancel(); <-queue.Done() })
+	first, created, err := queue.Submit(ctx, conversation.Input{
+		Scope: state.RoomScope("room"), MessageID: "first", Text: "Draft the report",
+	})
+	if err != nil || !created {
+		t.Fatalf("submit first run = (%+v, %v, %v)", first, created, err)
+	}
+	select {
+	case <-agent.started:
+	case <-ctx.Done():
+		t.Fatal("first run did not reach the ACP prompt")
+	}
+	second, created, err := queue.Submit(ctx, conversation.Input{
+		Scope: state.RoomScope("room"), MessageID: "second", Text: "Focus on Friday",
+	})
+	if err != nil || !created || second.ID == first.ID {
+		t.Fatalf("submit steering run = (%+v, %v, %v)", second, created, err)
+	}
+	steered, found, err := queue.Wait(ctx, second.ID)
+	if err != nil || !found || steered.Status != "completed" ||
+		!steered.Steered || steered.ActiveRunID != first.ID {
 		t.Fatalf("steer result = %+v", steered)
 	}
 	if text := <-agent.steers; text != "Focus on Friday" {
 		t.Fatalf("steer text = %q", text)
 	}
-	if err := <-firstError; err != nil {
-		t.Fatalf("first Handle: %v", err)
+	if session := <-agent.sessions; session != "steering-session" {
+		t.Fatalf("steer session = %q", session)
 	}
-	if first := <-firstResult; first.RunID != steered.RunID || first.Reply != "steered reply" {
-		t.Fatalf("first result = %+v; steer = %+v", first, steered)
+	message, found, err := runtime.cfg.Store.Message(ctx, "second")
+	if err != nil || !found || message.Text != "Focus on Friday" {
+		t.Fatalf("stored steering message = (%+v, %v, %v)", message, found, err)
+	}
+	close(agent.release)
+	completed, found, err := queue.Wait(ctx, first.ID)
+	if err != nil || !found || completed.Status != "completed" || completed.Reply != "steered reply" {
+		t.Fatalf("first result = %+v", completed)
+	}
+	if calls := agent.promptCalls.Load(); calls != 1 {
+		t.Fatalf("ACP prompt calls = %d, want 1", calls)
 	}
 }
 

@@ -56,6 +56,18 @@ poll a run resource or request a short bounded wait.
 - As an API caller, a repeated message ID resolves to the first queued run.
 - As an operator, queued work survives a service restart and processing work
   returns to the queue after an interrupted process.
+- As an operator, when an ACP adapter does not answer cancellation, the turn
+  ends within a fixed grace period and releases its worker.
+- As a security owner, the ACP adapter receives only the environment values
+  required to start Claude and run its selected MCP servers.
+- As an API caller, when a queued turn fails or times out, its run reaches the
+  failed state with a useful bounded error.
+- As an operator, when shutdown interrupts a queued turn, the same run ID
+  returns to the queue and completes after restart.
+- As a room member, when a second queued message reaches an active turn, the
+  second run records steering against the active run.
+- As a room member, when a saved ACP session is missing, a replacement session
+  receives the saved handoff. Other session-load failures stop the turn.
 
 ## Design
 
@@ -89,6 +101,11 @@ the process environment or `.env` and go only to the selected MCP subprocess.
 Webex credentials stay in the Webex client and Claude credentials stay in the
 ACP adapter.
 
+The ACP client sends cancellation when a turn context ends. It waits for a
+short grace period, then returns the context error and releases the worker. The
+adapter process receives a small system environment plus values that the
+harness supplies for Claude and the selected MCP profile.
+
 The HTTP service exposes `GET /healthz`, `GET /v1/personas`,
 `POST /v1/messages`, `GET /v1/runs/{runId}`, and `POST /v1/webex/events`.
 Message submission writes a durable queue row and returns `202`. Run workers
@@ -107,4 +124,7 @@ waits, run polling, input validation, Webex signatures, and scope routing.
 Store and manager tests check queue recovery, idempotency, restart resume,
 independent persona, room, and thread sessions, stable pool slots, live
 steering, rotation handoff, fresh sessions, and webhook deduplication.
+Failure-path tests check bounded ACP cancellation, adapter credential scope,
+failed run state, shutdown requeue, worker restart, queue-to-ACP steering,
+missing-session replacement, and session-load failure handling.
 `go test ./...` and live HTTP prompts provide the release checks.

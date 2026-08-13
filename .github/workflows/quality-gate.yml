@@ -1,0 +1,36 @@
+name: quality-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install quality tools
+        run: |
+          brew install actionlint shellcheck
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Run quality gate
+        run: CI=true bash scripts/gate/check.sh --force

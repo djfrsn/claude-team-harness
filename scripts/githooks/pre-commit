@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Enable once per clone with: git config core.hooksPath scripts/githooks
+exec bash "$(git rev-parse --show-toplevel)/scripts/gate/check.sh"

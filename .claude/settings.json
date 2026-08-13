@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "h=\"$CLAUDE_PROJECT_DIR/scripts/hooks/quality-gate.sh\"; [ -x \"$h\" ] || exit 0; exec \"$h\" post-edit",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "h=\"$CLAUDE_PROJECT_DIR/scripts/hooks/quality-gate.sh\"; [ -x \"$h\" ] || exit 0; exec \"$h\" stop",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

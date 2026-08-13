@@ -1,0 +1,5 @@
+/claude-team-harness
+/config/mcp-profiles.json
+/.claude-team-harness/
+
+.env

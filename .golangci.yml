@@ -1,0 +1,58 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - contextcheck
+    - dupl
+    - errcheck
+    - funlen
+    - gochecknoinits
+    - gocyclo
+    - nestif
+    - noctx
+    - nolintlint
+    - revive
+    - staticcheck
+    - stylecheck
+
+linters-settings:
+  errcheck:
+    check-blank: true
+    exclude-functions:
+      - (io.Closer).Close
+      - os.Chmod
+      - os.Remove
+  funlen:
+    # Ratchet from the initial harness baseline. New functions stay compact.
+    lines: 175
+    statements: -1
+  gocyclo:
+    # The conversation state machine sets the initial ceiling.
+    min-complexity: 40
+  dupl:
+    threshold: 100
+  revive:
+    rules:
+      - name: argument-limit
+        arguments: [7]
+  nolintlint:
+    require-explanation: true
+    require-specific: true
+  nestif:
+    min-complexity: 10
+  stylecheck:
+    checks: ["ST1005"]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false
+  exclude-dirs:
+    - testdata
+  exclude-rules:
+    - linters: [stylecheck]
+      text: "ST1005"
+      source: '"(Claude|Webex|Jira|Confluence|JSON|HTTP|ACP|MCP|SQLite)'

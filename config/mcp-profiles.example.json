@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "planning-read-only": {
+      "servers": [
+        {
+          "name": "atlassian",
+          "command": "/absolute/path/to/company-atlassian-mcp",
+          "args": ["--read-only"],
+          "env_from": ["JIRA_BASE_URL", "JIRA_USER_EMAIL", "JIRA_API_TOKEN"]
+        }
+      ]
+    }
+  }
+}

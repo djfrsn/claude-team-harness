@@ -87,6 +87,36 @@ the prompt, prints the reply, and exits:
 
 Use `-session-mode fresh` to discard that conversation's prior model context.
 
+## Persona memory
+
+Each persona owns one Markdown memory document in
+`.claude-team-harness/memory.db`. A new ACP session receives the document after
+the persona prompt. A warm session keeps the memory already in its context.
+
+The persona can replace its own document during a tool-enabled turn:
+
+```sh
+"$CLAUDE_TEAM_HARNESS_BIN" memory read
+"$CLAUDE_TEAM_HARNESS_BIN" memory write --file /tmp/memory.md
+```
+
+The service binds these commands to the active persona. A persona session
+cannot use `--as` to select another persona. The default permission policy can
+block the command; use an approved `allow_once` policy when personas can manage
+their memory.
+
+An operator names the persona explicitly:
+
+```sh
+./claude-team-harness memory read --as project-manager --out /tmp/pm-memory
+./claude-team-harness memory write --as project-manager --file /tmp/memory.md
+```
+
+The write replaces the full document. A document over 500 lines is rejected.
+After 450 lines, every turn asks the persona to prune it. Use `-memory-db` to
+select another database for `prompt` or `serve`; use
+`CLAUDE_TEAM_HARNESS_MEMORY_DB` with the standalone memory command.
+
 The default permission policy is `deny`. Use `allow_once` only when the Claude
 process and its MCP servers run with approved access. A persona can set
 `permission_policy` to override this default.

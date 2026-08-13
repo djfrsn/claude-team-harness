@@ -19,6 +19,7 @@ import (
 	"github.com/your-company/claude-team-harness/internal/acp"
 	"github.com/your-company/claude-team-harness/internal/conversation"
 	"github.com/your-company/claude-team-harness/internal/mcpprofile"
+	"github.com/your-company/claude-team-harness/internal/memory"
 	"github.com/your-company/claude-team-harness/internal/persona"
 	"github.com/your-company/claude-team-harness/internal/runqueue"
 	"github.com/your-company/claude-team-harness/internal/state"
@@ -31,6 +32,7 @@ const usage = `claude-team-harness runs a Claude Code team harness.
 Usage:
   claude-team-harness prompt [flags] <message>
   claude-team-harness serve [flags]
+  claude-team-harness memory <read|write> [flags]
 
 Run "claude-team-harness <command> -help" for command flags.
 `
@@ -52,6 +54,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return runPrompt(ctx, args[1:], stdout)
 	case "serve":
 		return runServe(ctx, args[1:])
+	case "memory":
+		return runMemory(ctx, args[1:], stdout)
 	case "help", "-help", "--help":
 		_, err := io.WriteString(stdout, usage)
 		return err
@@ -65,6 +69,7 @@ type agentFlags struct {
 	cwd              string
 	permissionPolicy string
 	stateDB          string
+	memoryDB         string
 	maxSessionTurns  int
 	envFile          string
 	personas         string
@@ -78,6 +83,7 @@ func addAgentFlags(flags *flag.FlagSet) *agentFlags {
 	flags.StringVar(&values.cwd, "cwd", "", "Claude session directory")
 	flags.StringVar(&values.permissionPolicy, "permission-policy", "deny", "deny or allow_once")
 	flags.StringVar(&values.stateDB, "state-db", ".claude-team-harness/state.db", "SQLite state database")
+	flags.StringVar(&values.memoryDB, "memory-db", defaultMemoryDB, "persona memory database")
 	flags.IntVar(&values.maxSessionTurns, "max-session-turns", 50, "turns before a context-preserving rotation")
 	flags.StringVar(&values.envFile, "env-file", "", "environment file (default: <cwd>/.env)")
 	flags.StringVar(&values.personas, "personas", "config/personas", "persona roster directory")
@@ -225,6 +231,7 @@ func runServe(ctx context.Context, args []string) error {
 type runtime struct {
 	team        *team.Runtime
 	store       *state.Store
+	memory      *memory.Store
 	environment func(string) string
 }
 
@@ -253,13 +260,29 @@ func openRuntime(ctx context.Context, values agentFlags) (*runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	profiles, err := mcpprofile.Load(values.mcpProfiles, environment)
+	memoryPath := values.memoryDB
+	if !filepath.IsAbs(memoryPath) {
+		memoryPath = filepath.Join(cwd, memoryPath)
+	}
+	memoryStore, err := memory.Open(ctx, memoryPath)
 	if err != nil {
 		_ = store.Close()
 		return nil, err
 	}
+	profiles, err := mcpprofile.Load(values.mcpProfiles, environment)
+	if err != nil {
+		_ = store.Close()
+		_ = memoryStore.Close()
+		return nil, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		_ = store.Close()
+		_ = memoryStore.Close()
+		return nil, fmt.Errorf("resolve harness executable: %w", err)
+	}
 	teamRuntime, err := team.New(ctx, team.Config{
-		Roster: roster, Profiles: profiles, Store: store, Cwd: cwd,
+		Roster: roster, Profiles: profiles, Store: store, Memory: memoryStore, Cwd: cwd,
 		MaxTurns: values.maxSessionTurns, MaxAgents: values.maxAgents, Logf: log.Printf,
 		Start: func(
 			ctx context.Context, member persona.Persona, _ []acp.MCPServer, onEvent func(acp.Event),
@@ -276,7 +299,11 @@ func openRuntime(ctx context.Context, values agentFlags) (*runtime, error) {
 			if err != nil {
 				return nil, nil, fmt.Errorf("persona %s: %w", member.Name, err)
 			}
-			adapterEnv := []string{}
+			adapterEnv := []string{
+				memoryPersonaEnv + "=" + member.Name,
+				memoryDBEnvironment + "=" + memoryPath,
+				harnessBinaryEnv + "=" + executable,
+			}
 			if token := environment("CLAUDE_OAUTH_TOKEN"); token != "" {
 				adapterEnv = append(adapterEnv, "CLAUDE_OAUTH_TOKEN="+token)
 			}
@@ -292,13 +319,16 @@ func openRuntime(ctx context.Context, values agentFlags) (*runtime, error) {
 	})
 	if err != nil {
 		_ = store.Close()
+		_ = memoryStore.Close()
 		return nil, err
 	}
-	return &runtime{team: teamRuntime, store: store, environment: environment}, nil
+	return &runtime{
+		team: teamRuntime, store: store, memory: memoryStore, environment: environment,
+	}, nil
 }
 
 func (r *runtime) Close() error {
-	return errors.Join(r.team.Close(), r.store.Close())
+	return errors.Join(r.team.Close(), r.store.Close(), r.memory.Close())
 }
 
 func loadEnvironment(path, cwd string) (func(string) string, error) {

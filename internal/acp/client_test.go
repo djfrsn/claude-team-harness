@@ -3,9 +3,33 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 )
+
+func TestConnectionLossReportsAdapterUnavailable(t *testing.T) {
+	clientInput, agentOutput := io.Pipe()
+	connection := newConn(clientInput, io.Discard, func(string, json.RawMessage, responder) {})
+	response, err := connection.call("session/prompt", map[string]string{"sessionId": "lost"})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if err := agentOutput.Close(); err != nil {
+		t.Fatalf("close adapter output: %v", err)
+	}
+	if result := <-response; !errors.Is(result.err, ErrAdapterUnavailable) {
+		t.Fatalf("pending call error = %v, want adapter unavailable", result.err)
+	}
+	connection.wg.Wait()
+	client := &Client{conn: connection, done: make(chan struct{})}
+	if !client.Unavailable() {
+		t.Fatal("client with a closed connection reports available")
+	}
+	if _, err := connection.call("session/new", nil); !errors.Is(err, ErrAdapterUnavailable) {
+		t.Fatalf("closed connection error = %v, want adapter unavailable", err)
+	}
+}
 
 func TestPromptReturnsStreamedAgentMessage(t *testing.T) {
 	clientInput, agentOutput := io.Pipe()

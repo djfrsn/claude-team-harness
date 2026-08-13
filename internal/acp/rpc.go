@@ -3,7 +3,6 @@ package acp
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -55,7 +54,7 @@ func (c *conn) call(method string, params any) (<-chan callResult, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return nil, errors.New("connection is closed")
+		return nil, fmt.Errorf("%w: connection is closed", ErrAdapterUnavailable)
 	}
 	c.nextID++
 	id := c.nextID
@@ -68,13 +67,22 @@ func (c *conn) call(method string, params any) (<-chan callResult, error) {
 		c.mu.Lock()
 		delete(c.waits, id)
 		c.mu.Unlock()
-		return nil, err
+		return nil, fmt.Errorf("%w: write request: %v", ErrAdapterUnavailable, err)
 	}
 	return result, nil
 }
 
 func (c *conn) notify(method string, params any) error {
-	return c.write(message{JSONRPC: "2.0", Method: method, Params: marshal(params)})
+	if err := c.write(message{JSONRPC: "2.0", Method: method, Params: marshal(params)}); err != nil {
+		return fmt.Errorf("%w: write notification: %v", ErrAdapterUnavailable, err)
+	}
+	return nil
+}
+
+func (c *conn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 func (c *conn) write(value message) error {
@@ -108,7 +116,9 @@ func (c *conn) readLoop(reader io.Reader) {
 	c.mu.Lock()
 	c.closed = true
 	for id, wait := range c.waits {
-		wait <- callResult{err: fmt.Errorf("connection lost: %w", readErr)}
+		wait <- callResult{err: fmt.Errorf(
+			"%w: connection lost: %v", ErrAdapterUnavailable, readErr,
+		)}
 		delete(c.waits, id)
 	}
 	c.mu.Unlock()

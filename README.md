@@ -108,7 +108,10 @@ Set credentials in the process environment or in `<cwd>/.env`. Use `-env-file`
 to select another file. Each component requests only its named values: the ACP
 adapter receives `CLAUDE_OAUTH_TOKEN`, Webex uses its Webex values, and each MCP
 server receives the values named by its profile. Keep `.env` outside source
-control.
+control. The ACP process inherits a small launch environment instead of the
+service environment. Supply a required proxy or custom CA value through the
+ACP configuration. Process isolation does not restrict files that the service
+account can read, so protect `.env` with operating-system permissions.
 
 Check health:
 
@@ -192,6 +195,13 @@ with different content returns `409`.
 Run status is `queued`, `running`, `completed`, or `failed`. Queue workers use
 `-turn-timeout` to bound each turn. Queued work survives a restart. A run that
 was active during an interrupted process returns to the queue at startup.
+Run one harness process for each state database. Recovery uses at-least-once
+delivery. Give each external mutation an idempotency key because a process can
+stop after the mutation and before it records completion.
+
+The ACP client sends `session/cancel` when a turn reaches its timeout. It waits
+two seconds for the adapter, then retires that adapter process. The next normal
+turn starts a replacement in the same pool slot and resumes its stored session.
 
 Add `Prefer: wait=30` to wait for up to 30 seconds. The service returns `200`
 with the completed run when it finishes during that interval. It returns `202`

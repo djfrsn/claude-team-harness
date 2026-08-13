@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -20,7 +21,17 @@ const (
 	protocolVersion = 1
 	maxFrame        = 4 << 20
 	closeGrace      = 5 * time.Second
+	cancelGrace     = 2 * time.Second
 )
+
+var (
+	// ErrSessionMissing reports that an adapter cannot restore a saved session.
+	ErrSessionMissing = errors.New("acp: saved session is missing")
+	// ErrAdapterUnavailable reports that the adapter process cannot accept work.
+	ErrAdapterUnavailable = errors.New("acp: adapter is unavailable")
+)
+
+var errAdapterRetired = fmt.Errorf("%w: adapter is retired", ErrAdapterUnavailable)
 
 type StopReason string
 
@@ -97,6 +108,8 @@ type Client struct {
 	reply         strings.Builder
 	steering      bool
 	onEvent       func(Event)
+	cancelGrace   time.Duration
+	retired       atomic.Bool
 }
 
 func Start(ctx context.Context, cfg Config) (*Client, error) {
@@ -115,8 +128,7 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), "sh", "-c", cfg.Command)
 	cmd.Dir = cfg.Dir
-	cmd.Env = append(cmd.Environ(), cfg.Env...)
-	cmd.Env = append(cmd.Env, "PWD="+cfg.Dir)
+	cmd.Env = adapterEnvironment(cfg.Dir, cfg.Env)
 	cmd.Stderr = cfg.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
@@ -133,7 +145,7 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 
 	client := &Client{
 		policy: cfg.PermissionPolicy, logf: cfg.Logf, cmd: cmd, done: make(chan struct{}),
-		onEvent: cfg.OnEvent,
+		onEvent: cfg.OnEvent, cancelGrace: cancelGrace,
 	}
 	client.conn = newConn(stdout, stdin, client.serve)
 	go func() {
@@ -221,12 +233,18 @@ func (c *Client) LoadSession(
 
 func IsSessionMissing(err error) bool {
 	var rpcErr *rpcError
-	return errors.As(err, &rpcErr) && rpcErr.Code == -32002
+	return errors.Is(err, ErrSessionMissing) || errors.As(err, &rpcErr) && rpcErr.Code == -32002
 }
 
 func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, error) {
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
+	if c.retired.Load() {
+		return Turn{}, errAdapterRetired
+	}
+	if err := ctx.Err(); err != nil {
+		return Turn{}, err
+	}
 
 	c.replyMu.Lock()
 	c.activeSession = sessionID
@@ -247,15 +265,41 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 	}
 
 	var result callResult
+	var cancellationCause error
 	select {
 	case <-ctx.Done():
-		if err := c.conn.notify("session/cancel", map[string]string{"sessionId": sessionID}); err != nil {
-			return Turn{}, fmt.Errorf("acp: cancel turn: %w", err)
+		cancellationCause = ctx.Err()
+		grace := c.promptCancellationGrace()
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		cancelResult := make(chan error, 1)
+		go func() {
+			cancelResult <- c.conn.notify(
+				"session/cancel", map[string]string{"sessionId": sessionID},
+			)
+		}()
+		select {
+		case result = <-response:
+		case err := <-cancelResult:
+			if err != nil {
+				return Turn{}, c.retireAfterCancelError(err, cancellationCause)
+			}
+			select {
+			case result = <-response:
+			case <-timer.C:
+				return Turn{}, c.retireAfterCancellation(grace, ctx.Err())
+			}
+		case <-timer.C:
+			return Turn{}, c.retireAfterCancellation(grace, ctx.Err())
 		}
-		result = <-response
 	case result = <-response:
 	}
 	if result.err != nil {
+		if cancellationCause != nil {
+			return Turn{}, errors.Join(
+				fmt.Errorf("acp: session/prompt: %w", result.err), cancellationCause,
+			)
+		}
 		return Turn{}, fmt.Errorf("acp: session/prompt: %w", result.err)
 	}
 	var stopped struct {
@@ -264,6 +308,9 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 	if err := json.Unmarshal(result.payload, &stopped); err != nil {
 		return Turn{}, fmt.Errorf("acp: decode prompt response: %w", err)
 	}
+	if cancellationCause != nil && stopped.StopReason == StopCancelled {
+		return Turn{}, fmt.Errorf("acp: session/prompt cancelled: %w", cancellationCause)
+	}
 
 	c.replyMu.Lock()
 	reply := c.reply.String()
@@ -271,9 +318,43 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string) (Turn, erro
 	return Turn{Reply: reply, StopReason: stopped.StopReason}, nil
 }
 
+func (c *Client) retireAfterCancelError(cancelErr, cancellationCause error) error {
+	c.retired.Store(true)
+	if err := c.killAdapter(); err != nil {
+		return errors.Join(
+			ErrAdapterUnavailable, fmt.Errorf("acp: cancel turn: %w", cancelErr),
+			err, cancellationCause,
+		)
+	}
+	return errors.Join(ErrAdapterUnavailable, fmt.Errorf("acp: cancel turn: %w", cancelErr), cancellationCause)
+}
+
+func (c *Client) retireAfterCancellation(grace time.Duration, cause error) error {
+	c.retired.Store(true)
+	if err := c.killAdapter(); err != nil {
+		return errors.Join(
+			ErrAdapterUnavailable,
+			fmt.Errorf("acp: stop adapter after cancellation grace: %w", err), cause,
+		)
+	}
+	return errors.Join(ErrAdapterUnavailable, fmt.Errorf(
+		"acp: session/prompt did not stop within %s after cancellation: %w", grace, cause,
+	))
+}
+
+func (c *Client) promptCancellationGrace() time.Duration {
+	if c.cancelGrace > 0 {
+		return c.cancelGrace
+	}
+	return cancelGrace
+}
+
 func (c *Client) SupportsSteering() bool { return c.steering }
 
 func (c *Client) Steer(ctx context.Context, sessionID, text string) (SteerOutcome, error) {
+	if c.retired.Load() {
+		return "", errAdapterRetired
+	}
 	if !c.steering {
 		return "", errors.New("acp: adapter does not support steering")
 	}
@@ -299,11 +380,8 @@ func (c *Client) Steer(ctx context.Context, sessionID, text string) (SteerOutcom
 }
 
 func (c *Client) Close() error {
-	if c.cmd.Process != nil {
-		if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err != nil &&
-			!errors.Is(err, syscall.ESRCH) {
-			return fmt.Errorf("acp: stop adapter: %w", err)
-		}
+	if err := c.killAdapter(); err != nil {
+		return fmt.Errorf("acp: stop adapter: %w", err)
 	}
 	select {
 	case <-c.done:
@@ -313,7 +391,21 @@ func (c *Client) Close() error {
 	}
 }
 
+func (c *Client) killAdapter() error {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return nil
+	}
+	err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
+}
+
 func (c *Client) callInto(ctx context.Context, method string, params, output any) error {
+	if c.retired.Load() {
+		return errAdapterRetired
+	}
 	response, err := c.conn.call(method, params)
 	if err != nil {
 		return err

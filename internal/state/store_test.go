@@ -61,6 +61,81 @@ func TestWebexQueueDeduplicatesAndClaims(t *testing.T) {
 	}
 }
 
+func TestMessageRunQueueDeduplicatesAndCompletes(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	wanted := MessageRun{
+		ID: "run-1", MessageID: "message-1", Scope: RoomScope("room-1"),
+		Text: "Daily report", Mode: "continue", Persona: "project-manager",
+	}
+	first, created, err := store.QueueMessageRun(ctx, wanted)
+	if err != nil || !created || first.ID != "run-1" {
+		t.Fatalf("first queue = (%+v, %v, %v)", first, created, err)
+	}
+	wanted.ID = "run-2"
+	duplicate, created, err := store.QueueMessageRun(ctx, wanted)
+	if err != nil || created || duplicate.ID != "run-1" {
+		t.Fatalf("duplicate queue = (%+v, %v, %v)", duplicate, created, err)
+	}
+	claimed, found, err := store.ClaimMessageRun(ctx)
+	if err != nil || !found || claimed.Status != "running" {
+		t.Fatalf("claim = (%+v, %v, %v)", claimed, found, err)
+	}
+	claimed.ResultPersona = "project-manager"
+	claimed.ActiveRunID = claimed.ID
+	claimed.Reply = "All clear"
+	claimed.StopReason = "end_turn"
+	if err := store.CompleteMessageRun(ctx, claimed); err != nil {
+		t.Fatalf("CompleteMessageRun: %v", err)
+	}
+	completed, found, err := store.MessageRun(ctx, claimed.ID)
+	if err != nil || !found || completed.Status != "completed" || completed.Reply != "All clear" {
+		t.Fatalf("completed = (%+v, %v, %v)", completed, found, err)
+	}
+}
+
+func TestMessageRunRecoveryRequeuesRunningWork(t *testing.T) {
+	path := t.TempDir() + "/state.db"
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	_, _, err = store.QueueMessageRun(ctx, MessageRun{
+		ID: "run-1", MessageID: "message-1", Scope: RoomScope("room-1"),
+		Text: "Daily report", Mode: "continue",
+	})
+	if err != nil {
+		t.Fatalf("QueueMessageRun: %v", err)
+	}
+	claimed, found, err := store.ClaimMessageRun(ctx)
+	if err != nil || !found {
+		t.Fatalf("ClaimMessageRun = (%v, %v)", found, err)
+	}
+	if err := store.StartRun(ctx, Run{
+		ID: claimed.ID, ScopeKey: claimed.Scope.Key, Persona: "project-manager",
+	}); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	recovered, found, err := store.ClaimMessageRun(ctx)
+	if err != nil || !found || recovered.ID != "run-1" {
+		t.Fatalf("recovered = (%+v, %v, %v)", recovered, found, err)
+	}
+	if err := store.StartRun(ctx, Run{
+		ID: recovered.ID, ScopeKey: recovered.Scope.Key, Persona: "project-manager",
+	}); err != nil {
+		t.Fatalf("restart recovered run: %v", err)
+	}
+}
+
 func TestParseStoredTimeRejectsInvalidValue(t *testing.T) {
 	if _, err := parseStoredTime("not-a-time"); err == nil {
 		t.Fatal("parseStoredTime accepted an invalid timestamp")

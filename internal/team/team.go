@@ -274,6 +274,16 @@ func (r *Runtime) Personas() []PersonaInfo {
 	return result
 }
 
+func (r *Runtime) ValidatePersona(name string) error {
+	if name == "" {
+		return nil
+	}
+	if _, found := r.cfg.Roster.Lookup(name); !found {
+		return persona.UnknownError{Name: name}
+	}
+	return nil
+}
+
 func (r *Runtime) Close() error {
 	var result error
 	for _, created := range r.pools {

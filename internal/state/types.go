@@ -46,3 +46,25 @@ type WebexEvent struct {
 	Attempts  int
 	CreatedAt time.Time
 }
+
+type MessageRun struct {
+	ID            string
+	Scope         Scope
+	MessageID     string
+	SenderID      string
+	Text          string
+	Mode          string
+	Persona       string
+	Status        string
+	ResultPersona string
+	ActiveRunID   string
+	Reply         string
+	StopReason    string
+	Generation    int
+	Cached        bool
+	Steered       bool
+	Error         string
+	CreatedAt     time.Time
+	StartedAt     time.Time
+	CompletedAt   time.Time
+}

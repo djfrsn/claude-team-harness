@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +20,7 @@ import (
 	"github.com/your-company/claude-team-harness/internal/conversation"
 	"github.com/your-company/claude-team-harness/internal/mcpprofile"
 	"github.com/your-company/claude-team-harness/internal/persona"
+	"github.com/your-company/claude-team-harness/internal/runqueue"
 	"github.com/your-company/claude-team-harness/internal/state"
 	"github.com/your-company/claude-team-harness/internal/team"
 	"github.com/your-company/claude-team-harness/internal/webex"
@@ -146,6 +145,13 @@ func runServe(ctx context.Context, args []string) error {
 	}
 	stopCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	queue, err := runqueue.New(stopCtx, runqueue.Config{
+		Store: runtime.store, Handler: runtime.team, Workers: max(4, values.maxAgents),
+		TurnTimeout: *turnTimeout, Validate: runtime.team.ValidatePersona, Logf: log.Printf,
+	})
+	if err != nil {
+		return err
+	}
 
 	var webexHandler http.Handler
 	var webexWorker *webex.Worker
@@ -183,7 +189,7 @@ func runServe(ctx context.Context, args []string) error {
 
 	server := &http.Server{
 		Addr:              *listen,
-		Handler:           newHTTPHandler(token, *turnTimeout, runtime.team, webexHandler),
+		Handler:           newHTTPHandler(token, *turnTimeout, queue, runtime.team, webexHandler),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -204,6 +210,11 @@ func runServe(ctx context.Context, args []string) error {
 		case <-time.After(10 * time.Second):
 			return errors.New("Webex worker did not stop within 10s")
 		}
+	}
+	select {
+	case <-queue.Done():
+	case <-time.After(10 * time.Second):
+		return errors.New("message run workers did not stop within 10s")
 	}
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return fmt.Errorf("serve HTTP: %w", serveErr)
@@ -340,133 +351,6 @@ func environmentValues(contents string) (map[string]string, error) {
 		values[name] = value
 	}
 	return values, nil
-}
-
-type messageHandler interface {
-	Handle(context.Context, conversation.Input) (conversation.Result, error)
-}
-
-type personaLister interface {
-	Personas() []team.PersonaInfo
-}
-
-func newHTTPHandler(
-	token string, turnTimeout time.Duration, manager messageHandler, webexHandler http.Handler,
-) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
-		writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	mux.HandleFunc("GET /v1/personas", func(response http.ResponseWriter, request *http.Request) {
-		if token != "" && !authorized(request, token) {
-			writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		lister, ok := manager.(personaLister)
-		if !ok {
-			writeJSON(response, http.StatusNotImplemented, map[string]string{"error": "persona listing unavailable"})
-			return
-		}
-		writeJSON(response, http.StatusOK, map[string]any{"personas": lister.Personas()})
-	})
-	mux.HandleFunc("POST /v1/messages", func(response http.ResponseWriter, request *http.Request) {
-		if token != "" && !authorized(request, token) {
-			writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		body := http.MaxBytesReader(response, request.Body, 1<<20)
-		decoder := json.NewDecoder(body)
-		decoder.DisallowUnknownFields()
-		var input struct {
-			ConversationID string `json:"conversation_id"`
-			RoomID         string `json:"room_id"`
-			RootMessageID  string `json:"root_message_id"`
-			MessageID      string `json:"message_id"`
-			SenderID       string `json:"sender_id"`
-			Text           string `json:"text"`
-			SessionMode    string `json:"session_mode"`
-			Persona        string `json:"persona"`
-		}
-		if err := decoder.Decode(&input); err != nil {
-			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "body must be a JSON object with text"})
-			return
-		}
-		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "body must contain one JSON object"})
-			return
-		}
-		input.Text = strings.TrimSpace(input.Text)
-		if input.Text == "" {
-			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "text is required"})
-			return
-		}
-		mode, err := conversation.ParseMode(input.SessionMode)
-		if err != nil {
-			writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		scope := messageScope(input.ConversationID, input.RoomID, input.RootMessageID)
-		turnCtx, cancel := context.WithTimeout(request.Context(), turnTimeout)
-		defer cancel()
-		turn, err := manager.Handle(turnCtx, conversation.Input{
-			Scope: scope, MessageID: input.MessageID, SenderID: input.SenderID,
-			Text: input.Text, Mode: mode, Persona: input.Persona,
-		})
-		if err != nil {
-			var unknown persona.UnknownError
-			if errors.As(err, &unknown) {
-				writeJSON(response, http.StatusBadRequest, map[string]string{"error": unknown.Error()})
-				return
-			}
-			log.Printf("agent turn failed: %v", err)
-			writeJSON(response, http.StatusBadGateway, map[string]string{"error": "agent turn failed"})
-			return
-		}
-		status := http.StatusOK
-		if turn.Steered {
-			status = http.StatusAccepted
-		}
-		writeJSON(response, status, map[string]any{
-			"conversation_id": scope.Key, "persona": turn.Persona, "run_id": turn.RunID,
-			"reply": turn.Reply, "stop_reason": string(turn.StopReason),
-			"generation": turn.Generation, "cached": turn.Cached, "steered": turn.Steered,
-		})
-	})
-	if webexHandler != nil {
-		mux.Handle("POST /v1/webex/events", webexHandler)
-	}
-	return mux
-}
-
-func messageScope(conversationID, roomID, rootMessageID string) state.Scope {
-	if roomID == "" {
-		roomID = "api"
-	}
-	if conversationID != "" {
-		return state.Scope{Key: conversationID, RoomID: roomID, RootMessageID: rootMessageID}
-	}
-	if rootMessageID != "" {
-		return state.ThreadScope(roomID, rootMessageID)
-	}
-	return state.RoomScope(roomID)
-}
-
-func authorized(request *http.Request, token string) bool {
-	const prefix = "Bearer "
-	header := request.Header.Get("Authorization")
-	if !strings.HasPrefix(header, prefix) {
-		return false
-	}
-	provided := strings.TrimPrefix(header, prefix)
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
-}
-
-func writeJSON(response http.ResponseWriter, status int, value any) {
-	response.Header().Set("Content-Type", "application/json")
-	response.WriteHeader(status)
-	if err := json.NewEncoder(response).Encode(value); err != nil {
-		log.Printf("encode HTTP response: %v", err)
-	}
 }
 
 func isLoopback(address string) bool {

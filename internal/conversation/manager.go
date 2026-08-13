@@ -51,6 +51,7 @@ func ParseMode(value string) (Mode, error) {
 
 type Input struct {
 	Scope     state.Scope
+	RunID     string
 	MessageID string
 	SenderID  string
 	Text      string
@@ -286,9 +287,13 @@ func (m *Manager) Handle(ctx context.Context, input Input) (Result, error) {
 func (m *Manager) runTurn(
 	ctx context.Context, input Input, sessionID, prompt string, contextEpoch int,
 ) (acp.Turn, string, error) {
-	runID, err := randomID("run")
-	if err != nil {
-		return acp.Turn{}, "", err
+	runID := input.RunID
+	if runID == "" {
+		var err error
+		runID, err = randomID("run")
+		if err != nil {
+			return acp.Turn{}, "", err
+		}
 	}
 	if err := m.cfg.Store.StartRun(ctx, state.Run{
 		ID: runID, ScopeKey: input.Scope.Key, Persona: m.cfg.Persona,

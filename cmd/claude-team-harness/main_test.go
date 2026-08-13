@@ -8,12 +8,15 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/your-company/claude-team-harness/internal/acp"
 	"github.com/your-company/claude-team-harness/internal/conversation"
 	"github.com/your-company/claude-team-harness/internal/persona"
+	"github.com/your-company/claude-team-harness/internal/runqueue"
+	"github.com/your-company/claude-team-harness/internal/state"
 	"github.com/your-company/claude-team-harness/internal/team"
 )
 
@@ -36,9 +39,30 @@ func (f fakeTeamHandler) Handle(ctx context.Context, input conversation.Input) (
 
 func (f fakeTeamHandler) Personas() []team.PersonaInfo { return f.personas }
 
-func TestMessageEndpointAuthenticatesAndReturnsTurn(t *testing.T) {
-	handler := newHTTPHandler("test-token", time.Second,
-		fakeMessageHandler(func(_ context.Context, input conversation.Input) (conversation.Result, error) {
+type blockingMessageHandler struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *blockingMessageHandler) Handle(
+	ctx context.Context, input conversation.Input,
+) (conversation.Result, error) {
+	f.once.Do(func() { close(f.started) })
+	select {
+	case <-f.release:
+		return conversation.Result{
+			Reply: "all clear", StopReason: acp.StopEndTurn, Generation: 2,
+			Persona: "project-manager", RunID: input.RunID,
+		}, nil
+	case <-ctx.Done():
+		return conversation.Result{}, ctx.Err()
+	}
+}
+
+func TestMessageEndpointAuthenticatesAndSupportsBoundedWait(t *testing.T) {
+	manager := fakeTeamHandler{
+		handle: fakeMessageHandler(func(_ context.Context, input conversation.Input) (conversation.Result, error) {
 			if input.Text != "daily report" {
 				t.Fatalf("message text = %q, want daily report", input.Text)
 			}
@@ -47,9 +71,11 @@ func TestMessageEndpointAuthenticatesAndReturnsTurn(t *testing.T) {
 			}
 			return conversation.Result{
 				Reply: "all clear", StopReason: acp.StopEndTurn, Generation: 2,
-				Persona: "project-manager", RunID: "run-1",
+				Persona: "project-manager", RunID: input.RunID,
 			}, nil
-		}), nil)
+		}),
+	}
+	handler := newHTTPHandler("test-token", time.Second, newTestQueue(t, manager, nil), manager, nil)
 
 	unauthorized := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"text":"daily report"}`))
 	unauthorizedResponse := httptest.NewRecorder()
@@ -60,38 +86,109 @@ func TestMessageEndpointAuthenticatesAndReturnsTurn(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"room_id":"delivery","text":"daily report"}`))
 	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Prefer", "wait=1")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("authorized status = %d, want %d; body = %s", response.Code, http.StatusOK, response.Body.String())
 	}
 	if body := response.Body.String(); !strings.Contains(body, `"reply":"all clear"`) ||
+		!strings.Contains(body, `"status":"completed"`) ||
 		!strings.Contains(body, `"persona":"project-manager"`) {
 		t.Fatalf("response body = %s, want reply and stop reason", body)
 	}
 }
 
+func TestMessageEndpointReturnsBeforeAgentCompletes(t *testing.T) {
+	manager := &blockingMessageHandler{started: make(chan struct{}), release: make(chan struct{})}
+	lister := fakeTeamHandler{}
+	handler := newHTTPHandler("", time.Second, newTestQueue(t, manager, nil), lister, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"conversation_id":"release","message_id":"async-1","text":"report"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"run_id":"run:`) {
+		t.Fatalf("submit response = %d %s", response.Code, response.Body.String())
+	}
+	select {
+	case <-manager.started:
+	case <-time.After(time.Second):
+		t.Fatal("queued run did not start")
+	}
+	close(manager.release)
+	runID := response.Header().Get("Location")
+	request = httptest.NewRequest(http.MethodGet, runID, nil)
+	for range 50 {
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if strings.Contains(response.Body.String(), `"status":"completed"`) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("run did not complete through the polling endpoint")
+}
+
+func TestMessageEndpointDeduplicatesMessageID(t *testing.T) {
+	manager := &blockingMessageHandler{started: make(chan struct{}), release: make(chan struct{})}
+	lister := fakeTeamHandler{}
+	handler := newHTTPHandler("", time.Second, newTestQueue(t, manager, nil), lister, nil)
+	requestBody := `{"conversation_id":"release","message_id":"same","text":"report"}`
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody)))
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody)))
+	if first.Header().Get("Location") == "" || first.Header().Get("Location") != second.Header().Get("Location") {
+		t.Fatalf("duplicate locations = %q and %q", first.Header().Get("Location"), second.Header().Get("Location"))
+	}
+	conflict := httptest.NewRecorder()
+	handler.ServeHTTP(conflict, httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"conversation_id":"release","message_id":"same","text":"different"}`)))
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflicting duplicate = %d %s", conflict.Code, conflict.Body.String())
+	}
+	close(manager.release)
+}
+
+func TestMessageEndpointRejectsExcessiveWait(t *testing.T) {
+	manager := fakeTeamHandler{handle: func(context.Context, conversation.Input) (conversation.Result, error) {
+		return conversation.Result{}, nil
+	}}
+	handler := newHTTPHandler("", time.Second, newTestQueue(t, manager, nil), manager, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"text":"report"}`))
+	request.Header.Set("Prefer", "wait=2")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("excessive wait = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestMessageEndpointReturnsAcceptedForSteering(t *testing.T) {
-	handler := newHTTPHandler("", time.Second,
-		fakeMessageHandler(func(_ context.Context, input conversation.Input) (conversation.Result, error) {
+	manager := fakeTeamHandler{
+		handle: fakeMessageHandler(func(_ context.Context, input conversation.Input) (conversation.Result, error) {
 			if input.Persona != "engineer" {
 				t.Fatalf("persona = %q, want engineer", input.Persona)
 			}
 			return conversation.Result{
 				Persona: "engineer", RunID: "run-active", Steered: true,
 			}, nil
-		}), nil)
+		}),
+	}
+	handler := newHTTPHandler("", time.Second, newTestQueue(t, manager, nil), manager, nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"conversation_id":"release","persona":"engineer","text":"Use Friday"}`))
+	request.Header.Set("Prefer", "wait=1")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"steered":true`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"steered":true`) ||
+		!strings.Contains(response.Body.String(), `"active_run_id":"run-active"`) {
 		t.Fatalf("steer response = %d %s", response.Code, response.Body.String())
 	}
 }
 
 func TestPersonaEndpointListsEnabledPersonas(t *testing.T) {
-	handler := newHTTPHandler("", time.Second, fakeTeamHandler{
+	manager := fakeTeamHandler{
 		handle: func(context.Context, conversation.Input) (conversation.Result, error) {
 			return conversation.Result{}, nil
 		},
@@ -99,7 +196,8 @@ func TestPersonaEndpointListsEnabledPersonas(t *testing.T) {
 			{Name: "project-manager", DisplayName: "Project Manager", Default: true},
 			{Name: "engineer", DisplayName: "Engineer"},
 		},
-	}, nil)
+	}
+	handler := newHTTPHandler("", time.Second, newTestQueue(t, manager, nil), manager, nil)
 	request := httptest.NewRequest(http.MethodGet, "/v1/personas", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -109,10 +207,16 @@ func TestPersonaEndpointListsEnabledPersonas(t *testing.T) {
 }
 
 func TestMessageEndpointRejectsUnknownPersona(t *testing.T) {
-	handler := newHTTPHandler("", time.Second,
-		fakeMessageHandler(func(context.Context, conversation.Input) (conversation.Result, error) {
-			return conversation.Result{}, persona.UnknownError{Name: "writer"}
-		}), nil)
+	manager := fakeTeamHandler{handle: func(context.Context, conversation.Input) (conversation.Result, error) {
+		return conversation.Result{}, nil
+	}}
+	validate := func(name string) error {
+		if name == "writer" {
+			return persona.UnknownError{Name: name}
+		}
+		return nil
+	}
+	handler := newHTTPHandler("", time.Second, newTestQueue(t, manager, validate), manager, nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"text":"hello","persona":"writer"}`))
 	response := httptest.NewRecorder()
@@ -123,17 +227,41 @@ func TestMessageEndpointRejectsUnknownPersona(t *testing.T) {
 }
 
 func TestMessageEndpointRejectsUnknownInput(t *testing.T) {
-	handler := newHTTPHandler("", time.Second,
-		fakeMessageHandler(func(context.Context, conversation.Input) (conversation.Result, error) {
-			t.Fatal("invalid input reached the agent")
-			return conversation.Result{}, nil
-		}), nil)
+	manager := fakeTeamHandler{handle: fakeMessageHandler(func(context.Context, conversation.Input) (conversation.Result, error) {
+		t.Fatal("invalid input reached the agent")
+		return conversation.Result{}, nil
+	})}
+	handler := newHTTPHandler("", time.Second, newTestQueue(t, manager, nil), manager, nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"text":"report","session":"other"}`))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown input status = %d, want %d", response.Code, http.StatusBadRequest)
 	}
+}
+
+func newTestQueue(
+	t *testing.T, handler runqueue.Handler, validate func(string) error,
+) *runqueue.Service {
+	t.Helper()
+	store, err := state.Open(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("Open state: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	queue, err := runqueue.New(ctx, runqueue.Config{
+		Store: store, Handler: handler, Workers: 2, TurnTimeout: time.Second,
+		Validate: validate,
+	})
+	if err != nil {
+		t.Fatalf("New queue: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		<-queue.Done()
+		_ = store.Close()
+	})
+	return queue
 }
 
 func TestNonLoopbackAddressNeedsToken(t *testing.T) {

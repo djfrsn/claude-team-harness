@@ -105,6 +105,29 @@ CREATE TABLE IF NOT EXISTS runtime_events (
   session_id TEXT NOT NULL DEFAULT '',
   state TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_runs (
+  run_id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL UNIQUE,
+  scope_key TEXT NOT NULL,
+  room_id TEXT NOT NULL,
+  root_message_id TEXT NOT NULL DEFAULT '',
+  sender_id TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  persona TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+  result_persona TEXT NOT NULL DEFAULT '',
+  active_run_id TEXT NOT NULL DEFAULT '',
+  reply TEXT NOT NULL DEFAULT '',
+  stop_reason TEXT NOT NULL DEFAULT '',
+  generation INTEGER NOT NULL DEFAULT 0,
+  cached INTEGER NOT NULL DEFAULT 0,
+  steered INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT ''
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate state database: %w", err)
@@ -112,6 +135,10 @@ CREATE TABLE IF NOT EXISTS runtime_events (
 	_, err := s.db.Exec(`UPDATE webex_events SET status = 'pending' WHERE status = 'processing'`)
 	if err != nil {
 		return fmt.Errorf("recover Webex events: %w", err)
+	}
+	_, err = s.db.Exec(`UPDATE message_runs SET status = 'queued', started_at = '' WHERE status = 'running'`)
+	if err != nil {
+		return fmt.Errorf("recover message runs: %w", err)
 	}
 	return nil
 }

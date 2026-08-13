@@ -56,7 +56,16 @@ func (s *Store) StartRun(ctx context.Context, run Run) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO runs (run_id, scope_key, persona, status, started_at)
-VALUES (?, ?, ?, 'running', ?)`, run.ID, run.ScopeKey, run.Persona,
+VALUES (?, ?, ?, 'running', ?)
+ON CONFLICT(run_id) DO UPDATE SET
+  scope_key = excluded.scope_key,
+  persona = excluded.persona,
+  status = 'running',
+  session_id = '',
+  reply = '',
+  error = '',
+  started_at = excluded.started_at,
+  completed_at = ''`, run.ID, run.ScopeKey, run.Persona,
 		run.StartedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("start run %q: %w", run.ID, err)

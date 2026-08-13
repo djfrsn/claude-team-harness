@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/your-company/claude-team-harness/internal/acp"
+	"github.com/your-company/claude-team-harness/internal/memory"
 	"github.com/your-company/claude-team-harness/internal/state"
 )
 
@@ -74,6 +75,7 @@ type Result struct {
 type Config struct {
 	Client        SessionClient
 	Store         *state.Store
+	Memory        *memory.Store
 	Cwd           string
 	Servers       []acp.MCPServer
 	MaxTurns      int
@@ -164,6 +166,7 @@ func (m *Manager) Handle(ctx context.Context, input Input) (Result, error) {
 		return Result{}, err
 	}
 
+	memoryBlock, prune := m.memoryFraming(ctx)
 	prompt := input.Text
 	sessionID := ""
 	generation := 1
@@ -228,6 +231,7 @@ func (m *Manager) Handle(ctx context.Context, input Input) (Result, error) {
 		if includeHandoff {
 			prompt = continuationPrompt(handoff, input.Text)
 		}
+		prompt = prependMemory(memoryBlock, prompt)
 		prompt = personaPrompt(m.cfg.PersonaPrompt, prompt)
 		conversation = state.Conversation{
 			Scope: input.Scope, ACPSessionID: sessionID, Generation: generation,
@@ -237,6 +241,7 @@ func (m *Manager) Handle(ctx context.Context, input Input) (Result, error) {
 			return Result{}, err
 		}
 	}
+	prompt = appendPrune(prompt, prune)
 	if !messageExists {
 		if _, err := m.cfg.Store.AddMessage(ctx, state.Message{
 			ID: input.MessageID, Scope: input.Scope, Role: "user",

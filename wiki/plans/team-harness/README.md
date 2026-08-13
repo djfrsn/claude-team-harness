@@ -17,6 +17,9 @@ variables that supply their credentials.
 Make generic HTTP message submission durable and asynchronous. A caller can
 poll a run resource or request a short bounded wait.
 
+Give each persona one bounded Markdown memory document. New ACP sessions load
+the document, and the persona can replace it through its identity-bound CLI.
+
 ## Requirements
 
 - As a Webex integration, I can send text and receive one Claude reply.
@@ -70,6 +73,8 @@ poll a run resource or request a short bounded wait.
   second run records steering against the active run.
 - As a room member, when a saved ACP session is missing, a replacement session
   receives the saved handoff. Other session-load failures stop the turn.
+- As a persona, when a new ACP session opens, I receive my own memory document
+  and can replace it without reaching another persona's document.
 
 ## Design
 
@@ -96,6 +101,11 @@ slot, routes live messages to ACP steering, and handles a steering miss as the
 next normal turn. A global limit bounds all persona processes. The sample roster
 enables a project manager and an engineer to prove routing and context isolation.
 A one-persona roster uses the same API and runtime path.
+
+The memory database stores one Markdown document per persona. A new ACP session
+receives the document after its persona prompt. The adapter environment binds
+the memory command to that persona. A 500-line cap bounds prompt use, and turns
+request pruning after 450 lines.
 
 MCP profiles use a file-backed JSON format. The checked-in example contains
 commands, arguments, and environment-variable names. Runtime values come from
@@ -132,4 +142,6 @@ Failure-path tests check bounded ACP cancellation, adapter credential scope,
 failed run state, shutdown requeue, worker restart, queue-to-ACP steering,
 missing-session replacement, unavailable-slot replacement, and session-load
 failure handling.
+Memory tests check persona isolation, full-document replacement, line limits,
+CLI identity binding, fresh-session framing, and warm-session pruning.
 `go test ./...` and live HTTP prompts provide the release checks.

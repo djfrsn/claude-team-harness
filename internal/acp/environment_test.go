@@ -28,6 +28,9 @@ func TestStartRestrictsAdapterEnvironment(t *testing.T) {
 			"ACP_TEST_BINARY=" + os.Args[0],
 			"ACP_TEST_ENVIRONMENT_FILE=" + environmentFile,
 			"CLAUDE_OAUTH_TOKEN=oauth-token",
+			"CLAUDE_TEAM_HARNESS_PERSONA=project-manager",
+			"CLAUDE_TEAM_HARNESS_MEMORY_DB=/private/memory.db",
+			"CLAUDE_TEAM_HARNESS_BIN=/usr/local/bin/claude-team-harness",
 			"PWD=/configured/pwd",
 		},
 		PermissionPolicy: PermissionDeny,
@@ -49,11 +52,14 @@ func TestStartRestrictsAdapterEnvironment(t *testing.T) {
 		t.Fatalf("decode adapter environment: %v", err)
 	}
 	for name, want := range map[string]string{
-		"PATH":               originalPath,
-		"HOME":               filepath.Join(directory, "home"),
-		"TMPDIR":             filepath.Join(directory, "tmp"),
-		"PWD":                directory,
-		"CLAUDE_OAUTH_TOKEN": "oauth-token",
+		"PATH":                          originalPath,
+		"HOME":                          filepath.Join(directory, "home"),
+		"TMPDIR":                        filepath.Join(directory, "tmp"),
+		"PWD":                           directory,
+		"CLAUDE_OAUTH_TOKEN":            "oauth-token",
+		"CLAUDE_TEAM_HARNESS_PERSONA":   "project-manager",
+		"CLAUDE_TEAM_HARNESS_MEMORY_DB": "/private/memory.db",
+		"CLAUDE_TEAM_HARNESS_BIN":       "/usr/local/bin/claude-team-harness",
 	} {
 		if got[name] != want {
 			t.Errorf("adapter %s = %q, want %q", name, got[name], want)

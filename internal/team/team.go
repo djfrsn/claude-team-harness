@@ -11,6 +11,7 @@ import (
 	"github.com/your-company/claude-team-harness/internal/acp"
 	"github.com/your-company/claude-team-harness/internal/conversation"
 	"github.com/your-company/claude-team-harness/internal/mcpprofile"
+	"github.com/your-company/claude-team-harness/internal/memory"
 	"github.com/your-company/claude-team-harness/internal/persona"
 	"github.com/your-company/claude-team-harness/internal/state"
 )
@@ -23,6 +24,7 @@ type Config struct {
 	Roster    *persona.Set
 	Profiles  *mcpprofile.Set
 	Store     *state.Store
+	Memory    *memory.Store
 	Cwd       string
 	MaxTurns  int
 	MaxAgents int
@@ -143,7 +145,8 @@ func newPool(ctx context.Context, cfg Config, member persona.Persona, global cha
 				return nil, nil, nil, startErr
 			}
 			manager, managerErr := conversation.New(conversation.Config{
-				Client: client, Store: cfg.Store, Cwd: cfg.Cwd, Servers: servers,
+				Client: client, Store: cfg.Store, Memory: cfg.Memory,
+				Cwd: cfg.Cwd, Servers: servers,
 				MaxTurns: cfg.MaxTurns, Persona: member.Name, PersonaPrompt: member.Prompt,
 				OnActive: func(runID, _ string, active bool) {
 					worker.activeMu.Lock()

@@ -53,6 +53,7 @@ check_shell() {
 	[ "${#files[@]}" -eq 0 ] || {
 		need shellcheck 'brew install shellcheck' && shellcheck "${files[@]}"
 	}
+	bash scripts/gate/loc_test.sh
 }
 
 check_actions() {
@@ -110,7 +111,11 @@ check_go_test() {
 }
 
 check_loc_budget() {
-  bash "$REPO_ROOT/scripts/gate/loc.sh" --check
+  if [ -n "${GITHUB_BASE_REF:-}" ]; then
+    bash "$REPO_ROOT/scripts/gate/loc.sh" --check --base-ref "origin/$GITHUB_BASE_REF"
+  else
+    bash "$REPO_ROOT/scripts/gate/loc.sh" --check
+  fi
 }
 
 run_check shell check_shell

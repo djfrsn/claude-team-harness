@@ -22,9 +22,11 @@ process standard input and output. The Go service supplies the HTTP boundary.
 7. Claude Code reads `CLAUDE.md`, the persona prompt, and its MCP tools.
 8. The worker posts the reply to the room or source thread.
 
-A daily scheduler uses `POST /v1/messages` with the room's conversation ID. The
-agent service owns Webex delivery, Claude sessions, and Jira and Confluence tool
-access.
+An external daily scheduler can use `POST /v1/messages` with the room's
+conversation ID to start a morning digest. The scheduler polls the run and can
+send the completed reply through Webex. The harness includes inbound Webex
+delivery, Claude sessions, and Jira and Confluence tool access. The external
+scheduler owns scheduled outbound Webex delivery.
 
 ## Conversation lifecycle
 
@@ -46,7 +48,7 @@ its root message and the agent's answer to that root when available.
 
 Requirements:
 
-- Go 1.23 or later
+- Go 1.25.12 or later
 - Claude Code with a valid company-approved login
 - `@agentclientprotocol/claude-agent-acp`
 
@@ -139,13 +141,38 @@ Content-Type: application/json
 }
 ```
 
-Successful response:
+The service stores the message and returns immediately:
+
+```http
+HTTP/1.1 202 Accepted
+Location: /v1/runs/run:...
+Retry-After: 2
+```
 
 ```json
 {
   "conversation_id": "delivery",
   "persona": "project-manager",
   "run_id": "run:...",
+  "status": "queued",
+  "status_url": "/v1/runs/run:..."
+}
+```
+
+Poll the run until it is complete:
+
+```http
+GET /v1/runs/run:...
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "conversation_id": "delivery",
+  "persona": "project-manager",
+  "run_id": "run:...",
+  "status": "completed",
+  "status_url": "/v1/runs/run:...",
   "reply": "The release is at risk because ...",
   "stop_reason": "end_turn",
   "generation": 1,
@@ -159,13 +186,23 @@ Successful response:
 `thread:<roomId>:<rootMessageId>`. `persona` selects an enabled persona. An
 omitted persona follows an `@name` mention, the conversation's prior route, or
 the default. `session_mode` accepts `continue` or `fresh`. Repeated `message_id`
-values return the stored reply without another Claude turn.
+values return the first run and preserve one Claude turn. Reusing a message ID
+with different content returns `409`.
 
-The endpoint holds the first request open until its Claude turn ends. A second
-message for the same persona and conversation steers the live turn when the ACP
-adapter supports steering. A delivered steer returns `202` with `steered: true`;
-the first request owns the final reply. A steering miss becomes the next normal
-turn. Set `-turn-timeout` to bound each turn.
+Run status is `queued`, `running`, `completed`, or `failed`. Queue workers use
+`-turn-timeout` to bound each turn. Queued work survives a restart. A run that
+was active during an interrupted process returns to the queue at startup.
+
+Add `Prefer: wait=30` to wait for up to 30 seconds. The service returns `200`
+with the completed run when it finishes during that interval. It returns `202`
+with the current state when the wait expires. The configured turn timeout is
+the maximum accepted wait.
+
+A second message for the same persona and conversation steers the live turn
+when the ACP adapter supports steering. The steering submission has its own run
+resource. When delivered, that resource completes with `steered: true` and
+`active_run_id` set to the turn it changed. A steering miss becomes the next
+normal turn.
 
 ## MCP profiles and credentials
 

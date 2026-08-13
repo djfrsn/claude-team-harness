@@ -188,6 +188,18 @@ func TestDuplicateMessageReturnsStoredReply(t *testing.T) {
 	}
 }
 
+func TestQueuedTurnKeepsProvidedRunID(t *testing.T) {
+	store := openStore(t)
+	manager := newManager(t, store, &fakeClient{}, 10)
+	result := handle(t, manager, Input{
+		Scope: state.RoomScope("room-1"), RunID: "run:queued",
+		MessageID: "queued-message", Text: "Run later",
+	})
+	if result.RunID != "run:queued" {
+		t.Fatalf("run ID = %q, want queued ID", result.RunID)
+	}
+}
+
 func TestStoredMessageDoesNotSteerActiveTurn(t *testing.T) {
 	store := openStore(t)
 	client := &steerClient{}

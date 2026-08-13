@@ -1,6 +1,6 @@
 module github.com/your-company/claude-team-harness
 
-go 1.23.0
+go 1.25.12
 
 require modernc.org/sqlite v1.38.2
 

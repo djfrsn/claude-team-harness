@@ -14,6 +14,9 @@ Extend the harness with a persona roster, one ACP process pool per persona, and
 live steering. MCP profiles select tool servers and name the environment
 variables that supply their credentials.
 
+Make generic HTTP message submission durable and asynchronous. A caller can
+poll a run resource or request a short bounded wait.
+
 ## Requirements
 
 - As a Webex integration, I can send text and receive one Claude reply.
@@ -44,6 +47,15 @@ variables that supply their credentials.
   each MCP server receives only the environment values named by that profile.
 - As an operator, I can inspect durable runs and steering events without storing
   credentials in runtime events.
+- As an API caller, when I submit a message, I receive a run ID before Claude
+  completes the turn.
+- As an API caller, I can poll the run ID and read its queued, running,
+  completed, or failed state.
+- As an API caller, I can request a bounded wait and receive the result when it
+  completes within that wait.
+- As an API caller, a repeated message ID resolves to the first queued run.
+- As an operator, queued work survives a service restart and processing work
+  returns to the queue after an interrupted process.
 
 ## Design
 
@@ -78,17 +90,21 @@ Webex credentials stay in the Webex client and Claude credentials stay in the
 ACP adapter.
 
 The HTTP service exposes `GET /healthz`, `GET /v1/personas`,
-`POST /v1/messages`, and `POST /v1/webex/events`. The Webex endpoint verifies
-the webhook secret, stores the message event, and returns `202`. Workers fetch
-messages, ignore bot messages, route them, run Claude, and post labeled replies.
-Concurrent workers let a later room message steer a live turn. Selected MCP
-profile definitions go into the ACP session request.
+`POST /v1/messages`, `GET /v1/runs/{runId}`, and `POST /v1/webex/events`.
+Message submission writes a durable queue row and returns `202`. Run workers
+call the same transport-neutral team runtime used by the command and Webex
+adapter. `Prefer: wait=<seconds>` waits up to a bounded interval. The Webex
+endpoint verifies the webhook secret, stores the message event, and returns
+`202`. Workers fetch messages, ignore bot messages, route them, run Claude, and
+post labeled replies. Concurrent workers let a later room message steer a live
+turn. Selected MCP profile definitions go into the ACP session request.
 
 ## Test
 
 Unit tests drive the ACP request and streamed reply across in-memory pipes. HTTP
-tests check authentication, persona discovery, input validation, Webex
-signatures, and scope routing. Store and manager tests check restart resume,
+tests check authentication, persona discovery, asynchronous submission, bounded
+waits, run polling, input validation, Webex signatures, and scope routing.
+Store and manager tests check queue recovery, idempotency, restart resume,
 independent persona, room, and thread sessions, stable pool slots, live
 steering, rotation handoff, fresh sessions, and webhook deduplication.
 `go test ./...` and live HTTP prompts provide the release checks.

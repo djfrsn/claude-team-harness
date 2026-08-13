@@ -56,11 +56,17 @@ type pool struct {
 }
 
 type slot struct {
-	manager *conversation.Manager
-	closer  io.Closer
-	permit  chan struct{}
+	permit chan struct{}
+	start  func(context.Context) (*conversation.Manager, io.Closer, func() bool, error)
 
-	mu        sync.Mutex
+	lifecycleMu   sync.RWMutex
+	manager       *conversation.Manager
+	closer        io.Closer
+	isUnavailable func() bool
+	unavailable   bool
+	closed        bool
+
+	activeMu  sync.Mutex
 	activeRun string
 }
 
@@ -116,9 +122,9 @@ func newPool(ctx context.Context, cfg Config, member persona.Persona, global cha
 		worker := &slot{permit: make(chan struct{}, 1)}
 		eventContext := context.WithoutCancel(ctx)
 		onEvent := func(event acp.Event) {
-			worker.mu.Lock()
+			worker.activeMu.Lock()
 			runID := worker.activeRun
-			worker.mu.Unlock()
+			worker.activeMu.Unlock()
 			if runID == "" {
 				return
 			}
@@ -129,32 +135,44 @@ func newPool(ctx context.Context, cfg Config, member persona.Persona, global cha
 				cfg.Logf("record runtime event for %s: %v", member.Name, err)
 			}
 		}
-		client, closer, err := cfg.Start(ctx, member, servers, onEvent)
+		worker.start = func(
+			startCtx context.Context,
+		) (*conversation.Manager, io.Closer, func() bool, error) {
+			client, closer, startErr := cfg.Start(startCtx, member, servers, onEvent)
+			if startErr != nil {
+				return nil, nil, nil, startErr
+			}
+			manager, managerErr := conversation.New(conversation.Config{
+				Client: client, Store: cfg.Store, Cwd: cfg.Cwd, Servers: servers,
+				MaxTurns: cfg.MaxTurns, Persona: member.Name, PersonaPrompt: member.Prompt,
+				OnActive: func(runID, _ string, active bool) {
+					worker.activeMu.Lock()
+					if active {
+						worker.activeRun = runID
+					} else {
+						worker.activeRun = ""
+					}
+					worker.activeMu.Unlock()
+				},
+				Logf: cfg.Logf,
+			})
+			if managerErr != nil {
+				_ = closer.Close()
+				return nil, nil, nil, managerErr
+			}
+			availability, _ := client.(interface{ Unavailable() bool })
+			return manager, closer, func() bool {
+				return availability != nil && availability.Unavailable()
+			}, nil
+		}
+		manager, closer, unavailable, err := worker.start(ctx)
 		if err != nil {
 			created.close()
 			return nil, fmt.Errorf("start persona %s slot %d: %w", member.Name, index, err)
 		}
-		worker.closer = closer
-		manager, err := conversation.New(conversation.Config{
-			Client: client, Store: cfg.Store, Cwd: cfg.Cwd, Servers: servers,
-			MaxTurns: cfg.MaxTurns, Persona: member.Name, PersonaPrompt: member.Prompt,
-			OnActive: func(runID, _ string, active bool) {
-				worker.mu.Lock()
-				if active {
-					worker.activeRun = runID
-				} else {
-					worker.activeRun = ""
-				}
-				worker.mu.Unlock()
-			},
-			Logf: cfg.Logf,
-		})
-		if err != nil {
-			_ = closer.Close()
-			created.close()
-			return nil, err
-		}
 		worker.manager = manager
+		worker.closer = closer
+		worker.isUnavailable = unavailable
 		created.slots = append(created.slots, worker)
 	}
 	return created, nil
@@ -218,14 +236,17 @@ func (p *pool) handle(ctx context.Context, input conversation.Input) (conversati
 	case <-ctx.Done():
 		return conversation.Result{}, ctx.Err()
 	}
-	return worker.manager.Handle(ctx, input)
+	if err := worker.replaceUnavailable(ctx); err != nil {
+		return conversation.Result{}, fmt.Errorf("recover persona %s slot: %w", p.persona.Name, err)
+	}
+	return worker.handle(ctx, input)
 }
 
 func (p *pool) steer(
 	ctx context.Context, input conversation.Input,
 ) (conversation.Result, bool, error) {
 	for _, worker := range p.slots {
-		result, delivered, err := worker.manager.Steer(ctx, input)
+		result, delivered, err := worker.steer(ctx, input)
 		if delivered || err != nil {
 			if delivered {
 				if eventErr := p.store.AddRuntimeEvent(
@@ -295,9 +316,96 @@ func (r *Runtime) Close() error {
 func (p *pool) close() error {
 	var result error
 	for _, worker := range p.slots {
-		result = errors.Join(result, worker.closer.Close())
+		result = errors.Join(result, worker.close())
 	}
 	return result
+}
+
+func (s *slot) handle(
+	ctx context.Context, input conversation.Input,
+) (conversation.Result, error) {
+	s.lifecycleMu.RLock()
+	if s.closed || s.manager == nil {
+		s.lifecycleMu.RUnlock()
+		return conversation.Result{}, errors.New("team slot is closed")
+	}
+	manager := s.manager
+	result, err := manager.Handle(ctx, input)
+	s.lifecycleMu.RUnlock()
+	if errors.Is(err, acp.ErrAdapterUnavailable) {
+		s.markUnavailable(manager)
+	}
+	return result, err
+}
+
+func (s *slot) steer(
+	ctx context.Context, input conversation.Input,
+) (conversation.Result, bool, error) {
+	s.lifecycleMu.RLock()
+	if s.closed || s.manager == nil || s.unavailable {
+		s.lifecycleMu.RUnlock()
+		return conversation.Result{}, false, nil
+	}
+	manager := s.manager
+	result, delivered, err := manager.Steer(ctx, input)
+	s.lifecycleMu.RUnlock()
+	if errors.Is(err, acp.ErrAdapterUnavailable) {
+		s.markUnavailable(manager)
+	}
+	return result, delivered, err
+}
+
+func (s *slot) markUnavailable(manager *conversation.Manager) {
+	s.lifecycleMu.Lock()
+	if s.manager == manager {
+		s.unavailable = true
+	}
+	s.lifecycleMu.Unlock()
+}
+
+func (s *slot) replaceUnavailable(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closed {
+		return errors.New("team slot is closed")
+	}
+	if !s.unavailable && (s.isUnavailable == nil || !s.isUnavailable()) {
+		return nil
+	}
+	if s.closer != nil {
+		if err := s.closer.Close(); err != nil {
+			return fmt.Errorf("close unavailable adapter: %w", err)
+		}
+		s.closer = nil
+		s.manager = nil
+		s.isUnavailable = nil
+	}
+	manager, closer, unavailable, err := s.start(ctx)
+	if err != nil {
+		return fmt.Errorf("start replacement adapter: %w", err)
+	}
+	s.manager = manager
+	s.closer = closer
+	s.isUnavailable = unavailable
+	s.unavailable = false
+	return nil
+}
+
+func (s *slot) close() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.closer == nil {
+		return nil
+	}
+	err := s.closer.Close()
+	s.closer = nil
+	s.manager = nil
+	s.isUnavailable = nil
+	return err
 }
 
 func qualify(personaName, key string) string { return personaName + "|" + key }

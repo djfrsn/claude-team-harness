@@ -24,10 +24,14 @@ const (
 	cancelGrace     = 2 * time.Second
 )
 
-// ErrSessionMissing reports that an adapter cannot restore a saved session.
-var ErrSessionMissing = errors.New("acp: saved session is missing")
+var (
+	// ErrSessionMissing reports that an adapter cannot restore a saved session.
+	ErrSessionMissing = errors.New("acp: saved session is missing")
+	// ErrAdapterUnavailable reports that the adapter process cannot accept work.
+	ErrAdapterUnavailable = errors.New("acp: adapter is unavailable")
+)
 
-var errAdapterRetired = errors.New("acp: adapter is retired")
+var errAdapterRetired = fmt.Errorf("%w: adapter is retired", ErrAdapterUnavailable)
 
 type StopReason string
 
@@ -318,22 +322,24 @@ func (c *Client) retireAfterCancelError(cancelErr, cancellationCause error) erro
 	c.retired.Store(true)
 	if err := c.killAdapter(); err != nil {
 		return errors.Join(
-			fmt.Errorf("acp: cancel turn: %w", cancelErr), err, cancellationCause,
+			ErrAdapterUnavailable, fmt.Errorf("acp: cancel turn: %w", cancelErr),
+			err, cancellationCause,
 		)
 	}
-	return errors.Join(fmt.Errorf("acp: cancel turn: %w", cancelErr), cancellationCause)
+	return errors.Join(ErrAdapterUnavailable, fmt.Errorf("acp: cancel turn: %w", cancelErr), cancellationCause)
 }
 
 func (c *Client) retireAfterCancellation(grace time.Duration, cause error) error {
 	c.retired.Store(true)
 	if err := c.killAdapter(); err != nil {
 		return errors.Join(
+			ErrAdapterUnavailable,
 			fmt.Errorf("acp: stop adapter after cancellation grace: %w", err), cause,
 		)
 	}
-	return fmt.Errorf(
+	return errors.Join(ErrAdapterUnavailable, fmt.Errorf(
 		"acp: session/prompt did not stop within %s after cancellation: %w", grace, cause,
-	)
+	))
 }
 
 func (c *Client) promptCancellationGrace() time.Duration {

@@ -48,7 +48,7 @@ its root message and the agent's answer to that root when available.
 
 Requirements:
 
-- Go 1.25.12 or later
+- Go 1.25.13 or later
 - Claude Code with a valid company-approved login
 - `@agentclientprotocol/claude-agent-acp`
 
@@ -72,6 +72,33 @@ Edit `CLAUDE.md` for shared policy. Persona files in `config/personas` set each
 role. The sample roster enables `project-manager` and `engineer`; it keeps
 `researcher` as a disabled example. A roster with one enabled persona uses the
 same runtime path.
+
+## TypeScript starter
+
+The `typescript` package carries the Studio frontend stack and quality floor:
+Preact, strict TypeScript, esbuild, Vitest with V8 coverage, Oxlint, Biome, and
+Knip. It contains a standalone hello-world app instead of Studio console code.
+
+Install the pinned runtime and frozen dependencies:
+
+```sh
+nvm install
+nvm use
+corepack prepare pnpm@11.19.0 --activate
+cd typescript
+pnpm install --frozen-lockfile
+pnpm check
+```
+
+`pnpm check` runs strict compiler checks, normal and type-aware linting,
+dependency checks, formatting, component tests, coverage floors, negative gate
+fixtures, and the production build. To inspect the built app locally:
+
+```sh
+python3 -m http.server 4173 --directory dist
+```
+
+Then open `http://127.0.0.1:4173`.
 
 ## Command-line check
 
@@ -296,9 +323,9 @@ Run the same checks used by hooks and CI:
 bash scripts/gate/check.sh
 ```
 
-The gate checks shell and workflow files, Go format and lint rules, known Go
-vulnerabilities, tests, race safety in CI, coverage, file length, and the source
-line budget.
+The gate checks shell and workflow files, the complete TypeScript package, Go
+format and lint rules, known Go vulnerabilities, tests, race safety in CI,
+coverage, file length, and the source line budget.
 
 The line budget uses 100-line bands. Routine work uses the current headroom.
 When a change crosses the ceiling, update it to the smallest new band:

@@ -19,11 +19,12 @@ count_lines() {
   {
     while IFS= read -r -d '' file; do
       [ ! -f "$file" ] || cat "$file"
-    done < <(git ls-files -z -- ':!:go.sum' ':!:*.png' ':!:*.jpg' ':!:*.gif')
+    done < <(git ls-files -z -- ':!:go.sum' ':!:**/pnpm-lock.yaml' \
+      ':!:*.png' ':!:*.jpg' ':!:*.gif')
     while IFS= read -r -d '' file; do
       [ ! -f "$file" ] || cat "$file"
     done < <(git ls-files -z --others --exclude-standard -- \
-      ':!:go.sum' ':!:*.png' ':!:*.jpg' ':!:*.gif')
+      ':!:go.sum' ':!:**/pnpm-lock.yaml' ':!:*.png' ':!:*.jpg' ':!:*.gif')
   } | wc -l | tr -d ' '
 }
 

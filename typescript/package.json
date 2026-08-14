@@ -1,0 +1,40 @@
+{
+  "name": "@claude-team-harness/typescript-starter",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The typed Preact starter for Claude Team Harness.",
+  "type": "module",
+  "engines": {
+    "node": "24.x",
+    "pnpm": "11.19.0"
+  },
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "runtime": "node verify-runtime.mjs",
+    "build": "pnpm run runtime && node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "lint": "oxlint --config .oxlintrc.json src *.mjs *.ts && oxlint --type-aware --config .oxlintrc.type-aware.json src",
+    "dependencies": "pnpm peers check && knip",
+    "format": "biome format --write src *.mjs *.ts",
+    "format:check": "biome format src *.mjs *.ts",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:floor": "node verify-floor.mjs",
+    "check": "pnpm run runtime && pnpm run typecheck && pnpm run lint && pnpm run dependencies && pnpm run format:check && pnpm run test:coverage && pnpm run test:floor && pnpm run build"
+  },
+  "dependencies": {
+    "preact": "10.29.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.4",
+    "@types/node": "24.13.3",
+    "@vitest/coverage-v8": "4.1.4",
+    "esbuild": "0.28.2",
+    "knip": "6.29.0",
+    "oxlint": "1.75.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "preact-render-to-string": "6.7.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.4"
+  }
+}

@@ -53,6 +53,14 @@ AFTER="$(bash scripts/gate/loc.sh)"
 [ "$AFTER" -eq "$((BEFORE + 3))" ] || fail 'untracked lines were not counted'
 rm -f untracked.txt
 
+BEFORE="$(bash scripts/gate/loc.sh)"
+mkdir -p generated
+printf 'lock\ncontent\n' > generated/pnpm-lock.yaml
+AFTER="$(bash scripts/gate/loc.sh)"
+[ "$AFTER" -eq "$BEFORE" ] || fail 'generated pnpm lock lines were counted'
+rm -f generated/pnpm-lock.yaml
+rmdir generated
+
 printf '%s\n' "$((CEILING + 100))" > scripts/gate/loc-budget.txt
 assert_fails bash scripts/gate/loc.sh --check --base-ref "$BASE_REF"
 printf '%s\n' "$CEILING" > scripts/gate/loc-budget.txt

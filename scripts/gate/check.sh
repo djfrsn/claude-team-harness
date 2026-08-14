@@ -62,6 +62,33 @@ check_actions() {
   [ -z "$files" ] || { need actionlint 'brew install actionlint' && actionlint; }
 }
 
+check_typescript() {
+  local package="$REPO_ROOT/typescript"
+  [ -f "$package/package.json" ] || return 0
+  need node 'nvm install 24 && nvm use 24' || return 1
+  need pnpm 'corepack prepare pnpm@11.19.0 --activate' || return 1
+
+  local node_major pnpm_version rc=0
+  node_major="$(node -p 'process.versions.node.split(".")[0]')"
+  if [ "$node_major" != 24 ]; then
+    printf 'gate: Node is %s; this gate pins 24. Repair it with: nvm install 24 && nvm use 24\n' \
+      "$(node --version)" >&2
+    rc=1
+  fi
+  pnpm_version="$(cd "$package" && pnpm --version 2>/dev/null)"
+  if [ "$pnpm_version" != 11.19.0 ]; then
+    printf 'gate: pnpm is %s; this gate pins 11.19.0. Repair it with: corepack prepare pnpm@11.19.0 --activate\n' \
+      "${pnpm_version:-missing}" >&2
+    rc=1
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  if [ ! -d "$package/node_modules" ]; then
+    printf 'gate: TypeScript dependencies are missing. Install them with: (cd typescript && pnpm install --frozen-lockfile)\n' >&2
+    return 1
+  fi
+  (cd "$package" && pnpm run check)
+}
+
 check_go_lint() {
   need go 'brew install go' || return 1
   need golangci-lint \
@@ -120,13 +147,14 @@ check_loc_budget() {
 
 run_check shell check_shell
 run_check actions check_actions
+run_check typescript check_typescript
 run_check go-lint check_go_lint
 run_check go-audit check_go_audit
 run_check go-test check_go_test
 run_check loc-budget check_loc_budget
 wait
 
-for name in shell actions go-lint go-audit go-test loc-budget; do
+for name in shell actions typescript go-lint go-audit go-test loc-budget; do
   [ -f "$WORK/$name.rc" ] || continue
   cat "$WORK/$name.out"
   cat "$WORK/$name.err" >&2
@@ -134,7 +162,7 @@ for name in shell actions go-lint go-audit go-test loc-budget; do
 done
 
 if [ "$RAN" -eq 0 ]; then
-  printf 'gate: unknown check %s (shell|actions|go-lint|go-audit|go-test|loc-budget)\n' "$ONLY" >&2
+  printf 'gate: unknown check %s (shell|actions|typescript|go-lint|go-audit|go-test|loc-budget)\n' "$ONLY" >&2
   exit 2
 fi
 exit "$FAILED"

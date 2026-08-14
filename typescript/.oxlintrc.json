@@ -1,0 +1,44 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "unicorn", "oxc", "react-hooks", "import"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn"
+  },
+  "rules": {
+    "react/no-danger": "error",
+    "react/react-in-jsx-scope": "off",
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/ban-ts-comment": "error",
+    "typescript/no-non-null-assertion": "error",
+    "import/no-cycle": "error",
+    "import/no-unassigned-import": "off",
+    "react/no-array-index-key": "error",
+    "eslint/max-depth": ["error", 4],
+    "eslint/max-params": ["error", 5],
+    "eslint/complexity": ["error", 15],
+    "eslint/max-lines-per-function": ["error", 150],
+    "eslint/max-lines": ["error", 500]
+  },
+  "overrides": [
+    {
+      "files": ["src/**/*.test.ts", "src/**/*.test.tsx"],
+      "rules": {
+        "typescript/no-non-null-assertion": "off",
+        "eslint/complexity": ["error", 25]
+      }
+    }
+  ],
+  "settings": {
+    "react": {
+      "runtime": "automatic"
+    }
+  },
+  "env": {
+    "browser": true,
+    "es2022": true
+  }
+}

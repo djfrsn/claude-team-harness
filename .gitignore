@@ -1,5 +1,8 @@
 /claude-team-harness
 /config/mcp-profiles.json
 /.claude-team-harness/
+/typescript/node_modules/
+/typescript/coverage/
+/typescript/dist/
 
 .env
